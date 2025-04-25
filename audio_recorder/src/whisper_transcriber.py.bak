@@ -608,7 +608,7 @@ class WhisperTranscriber(AudioTranscriber):
                 if item is None:
                     # Processa o buffer final
                     if self.stream_buffer:
-                        self._process_stream_buffer_with_final(is_final=True)
+                        self._process_stream_buffer(is_final=True)
                     break
                     
                 # Adiciona o chunk ao buffer
@@ -617,7 +617,7 @@ class WhisperTranscriber(AudioTranscriber):
                 
                 # Processa o buffer se tiver dados suficientes ou for final
                 if len(self.stream_buffer) >= 5 or is_final:
-                    self._process_stream_buffer_with_final(is_final)
+                    self._process_stream_buffer(is_final)
                     
                 self.stream_queue.task_done()
                 
@@ -629,7 +629,7 @@ class WhisperTranscriber(AudioTranscriber):
             self.streaming = False
             logger.info("Processador de streaming encerrado")
             
-    def _process_stream_buffer_with_final(self, is_final=False):
+    def _process_stream_buffer(self, is_final=False):
         """
         Processa o buffer de streaming acumulado.
         

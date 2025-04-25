@@ -12,6 +12,7 @@ from tkinter import scrolledtext # Widget para exibir e rolar texto
 import threading                # Para operações em segundo plano
 import time, os                 # Para operações de temporização e sistema de arquivos
 import sys                      # Para manipulação de caminhos de sistema
+import logging                  # Para logs
 
 # Adiciona o diretório raiz ao caminho de busca para importar constants
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,7 +26,7 @@ from constants import (
 # Importações de módulos do projeto
 from audio_recorder import AudioRecorder  # Classe para captura de áudio
 # Importamos da transcription_base que agora contém as funções anteriormente em audio_transcriber
-from transcription_base import save_frames_to_wav, transcribe_audio, default_transcriber
+from transcription_base import save_frames_to_wav, transcribe_audio, get_default_transcriber, transcribe_microphone_realtime
 
 class AudioRecorderGUI:
     """
@@ -40,24 +41,41 @@ class AudioRecorderGUI:
             root: Janela principal do Tkinter
         """
         self.root = root
+        
+        # Configurar logging
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+        self.logger = logging.getLogger("AudioRecorderGUI")
+        
         # Criar o gravador com a janela de buffer configurada (mantém WINDOW_SECONDS de áudio)
         self.rec = AudioRecorder(window_seconds=WINDOW_SECONDS)
         # Referência ao transcritor - pode ser alterada em tempo de execução se necessário
-        self.transcriber = default_transcriber
+        self.transcriber = get_default_transcriber()
+        
+        # Variável para armazenar o texto acumulado durante o streaming
+        self.accumulated_streaming_text = ""
         
         # Configuração da janela principal
-        root.title("Gravador")
-        root.geometry("300x250")  # Tamanho inicial da janela
+        root.title("Gravador de Áudio do Sistema")
+        root.geometry("300x320")  # Tamanho inicial da janela
         
         # Variável de controle para o status da aplicação
         self.status = tk.StringVar(value="Pronto")
+        
+        # Flag para indicar se estamos usando o modo de streaming
+        self.streaming_mode = False
         
         # Criação dos widgets
         # Label para mostrar o status atual
         tk.Label(root, textvariable=self.status).pack(pady=10)
         
         # Botão de gravação (ativa/desativa a captura de áudio)
-        tk.Button(root, text="Gravar", fg="red", command=self.toggle).pack(fill=tk.X, padx=20)
+        self.record_btn = tk.Button(root, text="Gravar", fg="red", command=self.toggle)
+        self.record_btn.pack(fill=tk.X, padx=20)
+        
+        # Botão de transcrição em streaming (novo modo)
+        self.stream_btn = tk.Button(root, text="Gravar com Streaming", fg="purple", 
+                                   command=self.toggle_streaming)
+        self.stream_btn.pack(fill=tk.X, padx=20, pady=5)
         
         # Botão de transcrição (processa todo o áudio capturado)
         self.trans_btn = tk.Button(root, text="Transcrever", fg="blue", 
@@ -69,7 +87,9 @@ class AudioRecorderGUI:
         
         # Painel de texto rolável para mostrar a transcrição
         self.txt = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, height=10)
-        self.txt.config(state=tk.DISABLED)  # Inicialmente desativado para edição
+        self.txt.config(state=tk.NORMAL)
+        self.txt.insert(tk.END, "Aplicativo pronto para capturar áudio do sistema.")
+        self.txt.config(state=tk.DISABLED)
         self.txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
         # Configura handler para o fechamento da janela
@@ -96,12 +116,118 @@ class AudioRecorderGUI:
             # daemon=True faz as threads terminarem quando o programa principal termina
             threading.Thread(target=self.rec.start_recording, daemon=True).start()
             threading.Thread(target=self._live_transcribe, daemon=True).start()
+            
+            # Desabilita o botão de streaming enquanto está gravando
+            self.stream_btn.config(state=tk.DISABLED)
         else:
             # Para a gravação
             self.rec.stop_recording()
             self.status.set("Pronto")
             # Habilita o botão de transcrição completa
             self.trans_btn.config(state=tk.NORMAL)
+            # Habilita o botão de streaming novamente
+            self.stream_btn.config(state=tk.NORMAL)
+            
+    def toggle_streaming(self):
+        """
+        Alterna entre iniciar e parar a gravação com transcrição em streaming.
+        Utiliza a nova funcionalidade de processamento em tempo real.
+        """
+        if not self.rec.get_recording_status():
+            # Inicia a gravação no modo streaming
+            self.streaming_mode = True
+            self.status.set("Gravando (Streaming)...")
+            
+            # Limpa transcrição anterior
+            self.txt.config(state=tk.NORMAL)
+            self.txt.delete("1.0", tk.END)
+            self.txt.insert(tk.END, "Iniciando transcrição...\nO texto aparecerá aqui em breve.\n\nUsando modelo Whisper 'base' para economizar recursos.")
+            self.txt.config(state=tk.DISABLED)
+            
+            # Reinicia o texto acumulado
+            self.accumulated_streaming_text = ""
+            
+            # Configura o callback para receber as transcrições em tempo real
+            transcribe_microphone_realtime(
+                self.rec, 
+                chunk_duration=3.0,  # Aumentado para reduzir processamento
+                callback=self._streaming_transcription_callback
+            )
+            
+            # Inicia a gravação
+            threading.Thread(target=self.rec.start_recording, daemon=True).start()
+            
+            # Altera o botão para "Parar Streaming"
+            self.stream_btn.config(text="Parar Streaming")
+            # Desabilita o botão de gravação normal enquanto estiver em streaming
+            self.record_btn.config(state=tk.DISABLED)
+        else:
+            # Para a gravação
+            self.rec.stop_recording()
+            self.streaming_mode = False
+            self.status.set("Pronto")
+            
+            # Restaura o texto original do botão
+            self.stream_btn.config(text="Gravar com Streaming")
+            # Habilita o botão de gravação normal novamente
+            self.record_btn.config(state=tk.NORMAL)
+            # Habilita o botão de transcrição completa
+            self.trans_btn.config(state=tk.NORMAL)
+            
+    def _streaming_transcription_callback(self, text, is_final):
+        """
+        Callback para receber texto transcrito em tempo real do modo streaming.
+        
+        Args:
+            text (str): Texto transcrito
+            is_final (bool): Se é o texto final da gravação
+        """
+        if not text:
+            return
+        
+        # Adiciona mensagem de debug (mais econômica)
+        if len(text) > 50:
+            self.logger.info(f"Recebido texto de {len(text)} caracteres")
+        
+        # Evitar atualizar a UI com muita frequência (economizar recursos)
+        # Armazenamos o texto recebido e atualizamos a interface de forma controlada
+        # Usa after_idle para otimizar ainda mais
+        self.accumulated_streaming_text = text
+        self.root.after_idle(lambda: self._update_streaming_text(text, is_final))
+        
+    def _update_streaming_text(self, text, is_final):
+        """
+        Atualiza a interface com o texto transcrito em streaming.
+        
+        Args:
+            text (str): Texto transcrito
+            is_final (bool): Se é o texto final da gravação
+        """
+        # Garante que temos um texto para mostrar
+        if not text:
+            return
+            
+        # Habilita a edição do texto
+        self.txt.config(state=tk.NORMAL)
+        
+        # Se é o texto final, adiciona uma marca
+        if is_final:
+            self.txt.delete("1.0", tk.END)
+            self.txt.insert(tk.END, text + "\n\n--- Transcrição Completa ---")
+        else:
+            # Atualiza o texto acumulado
+            self.accumulated_streaming_text = text
+            
+            # Mostra o texto na interface
+            self.txt.delete("1.0", tk.END)
+            self.txt.insert(tk.END, self.accumulated_streaming_text)
+        
+        # Rola para o final do texto
+        self.txt.see(tk.END)
+        self.txt.config(state=tk.DISABLED)
+        
+        # Forçar atualização imediata da janela
+        self.root.update_idletasks()
 
     def transcribe(self):
         """
